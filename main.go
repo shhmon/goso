@@ -1,18 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"math"
-
-	"github.com/DylanMeeus/GoAudio/breakpoint"
-	synth "github.com/DylanMeeus/GoAudio/synthesizer"
-	"github.com/DylanMeeus/GoAudio/wave"
+	"time"
 )
 
-const tau = 2 * math.Pi
+const twopi = 2 * math.Pi
 
 type Shape int
 
@@ -49,7 +44,7 @@ func NewOscillator(sr int, shape Shape) (*Oscillator, error) {
 		return nil, fmt.Errorf("Shape type %v not supported", shape)
 	}
 	return &Oscillator{
-		twopiosr: tau / float64(sr), // (2 * PI) / SampleRate
+		twopiosr: twopi / float64(sr), // (2 * PI) / SampleRate
 		tickfunc: cf,
 	}, nil
 }
@@ -63,11 +58,11 @@ func (o *Oscillator) Tick(freq float64) float64 {
 	o.curphase += o.incr
 
 	// adjust bounds
-	if o.curphase >= tau {
-		o.curphase -= tau
+	if o.curphase >= twopi {
+		o.curphase -= twopi
 	}
 	if o.curphase < 0 {
-		o.curphase = tau
+		o.curphase = twopi
 	}
 	return val
 
@@ -86,7 +81,7 @@ func squareCalc(phase float64) float64 {
 }
 
 func triangleCalc(phase float64) float64 {
-	val := 2.0*(phase*(1.0/tau)) - 1.0
+	val := 2.0*(phase*(1.0/twopi)) - 1.0
 	if val < 0.0 {
 		val = -val
 	}
@@ -95,24 +90,20 @@ func triangleCalc(phase float64) float64 {
 }
 
 func upwSawtoothCalc(phase float64) float64 {
-	val := 2.0*(phase*(1.0/tau)) - 1.0
+	val := 2.0*(phase*(1.0/twopi)) - 1.0
 	return val
 }
 
 func downSawtoothCalc(phase float64) float64 {
-	val := 1.0 - 2.0*(phase*(1.0/tau))
+	val := 1.0 - 2.0*(phase*(1.0/twopi))
 	return val
 }
 
 var (
-	duration   = flag.Int("d", 10, "duration of signal")
-	shape      = flag.String("s", "sine", "One of: sine, square, triangle, downsaw, upsaw")
-	amppoints  = flag.String("a", "", "amplitude breakpoints file")
-	freqpoints = flag.String("f", "", "frequency breakpoints file")
-	output     = flag.String("o", "", "output file")
+	shape = flag.String("s", "sine", "One of: sine, square, triangle, downsaw, upsaw")
 )
 
-var stringToShape = map[string]synth.Shape{
+var stringToShape = map[string]Shape{
 	"sine":     0,
 	"square":   1,
 	"downsaw":  2,
@@ -122,54 +113,44 @@ var stringToShape = map[string]synth.Shape{
 
 func main() {
 	flag.Parse()
-	fmt.Println("usage: go run . -d {dur} -s {shape} -a {amps} -f {freqs} -o {output}")
-	if output == nil {
-		panic("please provide an output file")
+
+	// A, D, S, R := 0.1, 0.2, 0.5, 1
+	sampleRate := 44100
+	bufferSize := 512
+	// bitsPerSample := 16
+
+	osc, err := NewOscillator(sampleRate, stringToShape[*shape])
+	if err != nil {
+		panic(err)
 	}
 
-	wfmt := wave.NewWaveFmt(1, 1, 44100, 16, nil)
-	amps, err := ioutil.ReadFile(*amppoints)
-	if err != nil {
-		panic(err)
-	}
-	ampPoints, err := breakpoint.ParseBreakpoints(bytes.NewReader(amps))
-	if err != nil {
-		panic(err)
-	}
-	ampStream, err := breakpoint.NewBreakpointStream(ampPoints, wfmt.SampleRate)
+	speaker := newSpeaker(sampleRate, bufferSize)
 
-	freqs, err := ioutil.ReadFile(*freqpoints)
-	if err != nil {
-		panic(err)
-	}
-	freqPoints, err := breakpoint.ParseBreakpoints(bytes.NewReader(freqs))
-	if err != nil {
-		panic(err)
-	}
-	freqStream, err := breakpoint.NewBreakpointStream(freqPoints, wfmt.SampleRate)
-	if err != nil {
-		panic(err)
-	}
-	// create wave file sampled at 44.1Khz w/ 16-bit frames
+	var freq float64 = 100
 
-	frames := generate(*duration, stringToShape[*shape], ampStream, freqStream, wfmt)
-	wave.WriteFrames(frames, wfmt, *output)
-	fmt.Println("done")
+	for {
+		value := osc.Tick(freq)
+		speaker.Write([2]float64{value, value})
+		time.Sleep(time.Duration(1 / sampleRate))
+	}
 }
 
-func generate(dur int, shape synth.Shape, ampStream, freqStream *breakpoint.BreakpointStream, wfmt wave.WaveFmt) []wave.Frame {
-	reqFrames := dur * wfmt.SampleRate
-	frames := make([]wave.Frame, reqFrames)
-	osc, err := synth.NewOscillator(wfmt.SampleRate, shape)
-	if err != nil {
-		panic(err)
-	}
+// func generate(dur int, shape Shape, ampStream, freqStream *breakpoint.BreakpointStream, sampleRate int) [][2]float64 {
+// 	numSamples := dur * sampleRate
+// 	osc, err := NewOscillator(sampleRate, shape)
 
-	for i := range frames {
-		amp := ampStream.Tick()
-		freq := freqStream.Tick()
-		frames[i] = wave.Frame(amp * osc.Tick(freq))
-	}
+// 	if err != nil {
+// 		panic(err)
+// 	}
 
-	return frames
-}
+// 	var samples = make([][2]float64, numSamples)
+
+// 	for i := range samples {
+// 		amp := ampStream.Tick()
+// 		freq := freqStream.Tick()
+// 		value := amp * osc.Tick(freq)
+// 		samples[i] = [2]float64{value, value}
+// 	}
+
+// 	return samples
+// }

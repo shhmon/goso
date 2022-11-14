@@ -8,90 +8,108 @@ import (
 )
 
 var (
-	mu      sync.Mutex
-	samples [][2]float64
-	buffer  []byte
-	context *oto.Context
-	player  *oto.Player
-	done    chan struct{}
+	mu sync.Mutex
 )
 
-func Init(sampleRate int, bufferSize int) error {
-	mu.Lock()
-	defer mu.Unlock()
+type Speaker struct {
+	mu         *sync.Mutex
+	sampleRate int
+	bufferSize int
+	samples    [][2]float64
+	buffer     []byte
+	done       chan struct{}
+	context    *oto.Context
+	player     *oto.Player
+}
 
-	Close()
-
+func newSpeaker(sampleRate int, bufferSize int) *Speaker {
 	numBytes := bufferSize * 4
-	samples = make([][2]float64, bufferSize)
-	buffer = make([]byte, numBytes)
 
-	context, err := oto.NewContext(int(sampleRate), 2, 2, numBytes)
+	speaker := Speaker{
+		mu:         &mu,
+		sampleRate: sampleRate,
+		bufferSize: bufferSize,
+		samples:    make([][2]float64, 0),
+		buffer:     make([]byte, numBytes, numBytes),
+		done:       make(chan struct{}),
+	}
 
+	context, err := oto.NewContext(sampleRate, 2, 2, numBytes)
 	if err != nil {
 		panic(err)
 	}
 
-	player = context.NewPlayer()
-
-	done = make(chan struct{})
+	speaker.context = context
+	speaker.player = context.NewPlayer()
 
 	go func() {
 		for {
 			select {
 			default:
-				update()
-			case <-done:
+				update(&speaker)
+			case <-speaker.done:
 				return
 			}
 		}
 	}()
 
-	return nil
+	return &speaker
 }
 
-func Close() {
-	if player != nil {
-		if done != nil {
-			done <- struct{}{}
-			done = nil
+func (s *Speaker) Close() {
+	if s.player != nil {
+		if s.done != nil {
+			s.done <- struct{}{}
+			s.done = nil
 		}
-		player.Close()
-		context.Close()
-		player = nil
+		s.player.Close()
+		s.context.Close()
+		s.player = nil
 	}
 }
 
-func update() {
-	mu.Lock()
-	defer mu.Unlock()
+func (s *Speaker) Write(sample [2]float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.samples = append(s.samples, sample)
+}
+
+func update(s *Speaker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var processed int
 
 	// Write samples to buffer
-	for i := range samples {
-		for c := range samples[i] {
-			val := samples[i][c]
+write:
+	for i := range s.samples {
+		processed++
+
+		for c := range s.samples[i] {
+			val := s.samples[i][c]
 			val = math.Max(val, -1)
 			val = math.Min(val, +1)
 
 			valInt16 := int16(val * (1<<15 - 1))
 			low := byte(valInt16)
 			high := byte(valInt16 >> 8)
-			buffer[i*4+c*2+0] = low
-			buffer[i*4+c*2+1] = high
+
+			lowId := i*4 + c*2 + 0
+			highId := i*4 + c*2 + 1
+
+			if highId > cap(s.buffer) {
+				break write
+			}
+
+			s.buffer[lowId] = low
+			s.buffer[highId] = high
 		}
 	}
 
-	// Clear the samples
-	for i := range samples {
-		samples[i] = [2]float64{}
+	if processed > 0 {
+		s.samples = s.samples[processed-1:]
 	}
 
-	player.Write(buffer)
-}
-
-func Write(newSamples [][2]float64) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	samples = append(samples, newSamples...)
+	s.player.Write(s.buffer)
 }
